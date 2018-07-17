@@ -44,6 +44,7 @@ import struct
 from collections import deque
 from binascii import hexlify
 
+labviewVersion = 16
 suppressPrinting = True 	# Only turn to False if running print tests. MUST be
 							# TRUE for code to work
 
@@ -372,7 +373,7 @@ def sendToLabview(dataToSend):
 
 		#  - - - - - - - - continuation of 'variantExporter(v)' - - - - - - - -  #
 		descriptor, hexData = export(v.data)
-		return "17008000" + exportUInt32(len(descriptors))[1] + ''.join(descriptors) + "0001" + descriptor + hexData + "00000000"
+		return str(labviewVersion*100) + "8000" + exportUInt32(len(descriptors))[1] + ''.join(descriptors) + "0001" + descriptor + hexData + "00000000"
 
 	sys.stdout = sys.__stdout__	# re-enable printing
 	sys.stdout.write(variantExporter(variant(dataToSend)) + "\n")
