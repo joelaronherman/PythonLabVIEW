@@ -37,15 +37,16 @@
 # -> http://zone.ni.com/reference/en-XX/help/371361P-01/lvconcepts/flattened_data/
 
 import sys
-from os import devnull
+from os import devnull, remove
 from ctypes import *
 import numpy as np
 import struct
 from collections import deque
 from binascii import hexlify
 
-labviewVersion = 16
-suppressPrinting = True 	# Only turn to False if running print tests. MUST be
+labviewVersion = 16			# Set this variable to match version of labview when not
+							# calling 'getFromLabview()' (where value is auto-detected).
+suppressPrinting = False 	# Only turn to False if running print tests. MUST be
 							# TRUE for code to work
 
 ############################# VARIANT CLASS ##############################
@@ -58,6 +59,14 @@ class variant:					# This class MUST be used every time a
 	def __str__(self):
 		return "<Variant: " + str(self.data) + ">"
 
+######################### GLOBAL UTILITY METHODS #########################
+##########################################################################
+def bytesToInt(b):
+		i = 0
+		for e in b:
+			i = (i<<8) + e
+		return i
+
 ###################### TYPENOTSUPPORTED EXCEPTION ########################
 ##########################################################################
 class TypeNotSupportedException(Exception):
@@ -69,18 +78,57 @@ class TypeNotSupportedException(Exception):
 # This method is used to pass data from LabVIEW to Python. It collects the flattend LabVIEW
 # data structure from sys.argv[1] and returns the equivalent data structure in Python.
 def getFromLabview():
-	# if len(sys.argv) <= 1:	# If there is no argument (aka not called by LabVIEW), return 'None'
-	# 	return None			# and do not disable printing. This allows for user diagnostics.
-
 	if suppressPrinting:
 		sys.stdout = open(devnull, 'w')	# Disable printing until last line of 'sendToLabview()'. Any
 										# unexpected print statements will interfere data passing.
 
+	############################ 'GLOBAL' CLASSES# ###########################
+	##########################################################################
+	class bytestream:		# Superclass for data type of 'data'. Has utility methods:
+		def mPeek(self, n):		# mPeek: returns the next 'n' bytes as a bytearray, but
+			return				#	 keeps the current byte pointer in place 
+		def mPop(self, n):		# mPop: returns the next 'n' bytes as a bytearray,
+			return				#	 placign moving the current byte pointer forward by 'n'
+		def nPeek(self, n):		# nPeek: same as mPeek, but returns the data as an int
+			return bytesToInt(self.mPeek(n))
+		def nPop(self, n):		# nPop: same as mPop, but returns the data as an int
+			return bytesToInt(self.mPop(n))
+		def close(self):		# close: called at end of 'getFromLabview()'
+			return				#	 closes and deletes any temp files, if used.
+
+	class bytestreamFromHexString(bytestream):	# Subclass used when data is passed
+		def __init__(self, s):					#	 as a hex string through cmd
+			self.b = deque(bytearray.fromhex(s))# Wraps a HexString as a bytesream
+		def mPeek(self, n):
+			return bytearray(map(lambda x: self.b[x], range(n)))
+		def mPop(self, n):
+			return bytearray(map(lambda __: self.b.popleft(), range(n)))
+
+	class bytetreamFromBinFile(bytestream):		# Subclass used when data is passed
+		def __init__(self, filepath):			#	 through a *.bin file
+			self.filepath = filepath			# Wraps a *.bin file as a bytestream
+			self.f = open(self.filepath, "rb")
+		def mPeek(self, n):
+			d = self.mPop(n)
+			self.f.seek(-n, 1)
+			return d
+		def mPop(self, n):
+			d = self.f.read(n)
+			try:
+				d = d.encode()
+			except:
+				pass
+			return bytearray(d)
+		def close(self):
+			self.f.close()
+			return remove(self.filepath)
+
 	########################### 'GLOBAL' CONSTANTS ###########################
 	##########################################################################
-	# data = deque(bytearray.fromhex(sys.argv[1]))	# the data to be unflattened
-	data = deque(bytearray.fromhex(sys.argv[1]))
-				#	'data' acts as a global variable throughout unflattening.
+	data = bytestreamFromBinFile((sys.argv[1])[3:]) if (sys.argv[1])[:3] == 'bin' else bytestreamFromHexString(sys.argv[1])
+						# 'data' acts as a global variable throughout unflattening.
+
+	labviewVersion = int(hexlify(data.mPeek(2)))/100
 
 	methodLookup = {	# converts typecodes to a type-specific parser to call
 		0x00	:	"parseNone",
@@ -111,26 +159,6 @@ def getFromLabview():
 		0x53	:	"parseVariant"
 	}
 
-	######################## 'GLOBAL' UTILITY METHODS ########################
-	##########################################################################
-	def bytesToInt(b):
-		i = 0
-		for e in b:
-			i = (i<<8) + e
-		return i
-
-	def mPeek(n=1):
-		return bytearray(map(lambda x: data[x], range(n)))
-
-	def mPop(n=1):
-		return bytearray(map(lambda x: data.popleft(), range(n)))
-
-	def nPeek(n=1):
-		return bytesToInt(mPeek(n))
-
-	def nPop(n=1):
-		return bytesToInt(mPop(n))
-
 	############################# VARIANT PARSER #############################
 	##########################################################################
 	def variantParser():	# As all passed data is contained within a variant,
@@ -145,34 +173,34 @@ def getFromLabview():
 			return None
 
 		def parseInt8(__):
-			return np.int8(c_char(nPop()))
+			return np.int8(c_char(data.nPop()))
 
 		def parseInt16(__):
-			return np.int16(c_short(nPop(2)))
+			return np.int16(c_short(data.nPop(2)))
 
 		def parseInt32(__):
-			return np.int32(c_long(nPop(4)))
+			return np.int32(c_long(data.nPop(4)))
 
 		def parseInt64(__):
-			return np.int64(c_longlong(nPop(8)))
+			return np.int64(c_longlong(data.nPop(8)))
 
 		def parseUInt8(__):
-			return np.uint8(c_uchar(nPop()))
+			return np.uint8(c_uchar(data.nPop()))
 
 		def parseUInt16(__):
-			return np.uint16(c_ushort(nPop(2)))
+			return np.uint16(c_ushort(data.nPop(2)))
 
 		def parseUInt32(__):
-			return np.uint32(c_uint32(nPop(4)))
+			return np.uint32(c_uint32(data.nPop(4)))
 
 		def parseUInt64(__):
-			return np.uint64(c_ulonglong(nPop(8)))
+			return np.uint64(c_ulonglong(data.nPop(8)))
 
 		def parseFloat32(__):
-			return np.float32(cast(pointer(c_int32(nPop(4))), POINTER(c_float)).contents)
+			return np.float32(cast(pointer(c_int32(data.nPop(4))), POINTER(c_float)).contents)
 
 		def parseFloat64(__):
-			return np.float64(cast(pointer(c_longlong(nPop(8))), POINTER(c_double)).contents)
+			return np.float64(cast(pointer(c_longlong(data.nPop(8))), POINTER(c_double)).contents)
 
 		def parseComplex64(__):
 			return np.complex64(parseFloat32(__) + parseFloat32(__)*1j)
@@ -181,17 +209,17 @@ def getFromLabview():
 			return np.complex128(parseFloat64(__) + parseFloat64(__)*1j)
 
 		def parseBool(__):
-			return bool(nPop())
+			return bool(data.nPop())
 
 		def parseStr(__):
-			return str(mPop(nPop(4)).decode())
+			return str(mPop(data.nPop(4)).decode())
 
 		def parsePath(index):
-			mPop(4)
-			l = nPop(4)
-			mPop(4)
-			d = chr(mPop(3)[1])
-			p = mPop(l-7)
+			data.mPop(4)
+			l = data.nPop(4)
+			data.mPop(4)
+			d = chr(data.mPop(3)[1])
+			p = data.mPop(l-7)
 			dot = False
 			for i in range(len(p)):
 				if (p[i]>>4) < 2:
@@ -203,7 +231,7 @@ def getFromLabview():
 		def parseArray(index):
 			descriptor = descriptors[index]
 			n = bytesToInt(descriptor[4:6])		# number of dimensions
-			dims = tuple(map(lambda x: nPop(4), range(n)))
+			dims = tuple(map(lambda x: data.nPop(4), range(n)))
 			elementD = bytesToInt(descriptor[-2:])
 			if bytesToInt((descriptors[elementD])[3:4]) == 0x50:# if array of type 'cluster': Special Case
 				a = np.empty(dims, dtype=object)				# case stops numpy from automatically
@@ -230,14 +258,16 @@ def getFromLabview():
 			return eval(methodLookup.get(bytesToInt((descriptors[index])[3:4]), "raiseException"), variantLocals)(index)	# calls appropriate type-specific parser
 		
 		# - - - - - - - - - continuation of 'variantParser()' - - - - - - - - -  #
-		mPop(4)
-		descriptors = tuple(map(lambda __: mPop(nPeek(2)), range(nPop(4))))	# determines the number of types, then pops each
-		mPop(2)																# type into  descriptors, according to its length.
-		temp = parser(nPop(2))
-		mPop(4)
+		data.mPop(4)
+		descriptors = tuple(map(lambda __: data.mPop(data.nPeek(2)), range(data.nPop(4))))	# determines the number of types, then pops each
+		data.mPop(2)																# type into  descriptors, according to its length.
+		temp = parser(data.nPop(2))
+		data.mPop(4)
 		return variant(temp)
 
-	return variantParser().data
+	v = variantParser().data
+	data.close()
+	return v
 
 
 ################################### SENDTOLABVIEW(dataToSend) ####################################
@@ -288,44 +318,44 @@ def sendToLabview(dataToSend):
 			return None if suppressDescriptors else "00040000", ""
 
 		def exportInt8(num=0, suppressDescriptors=False):
-			return None if suppressDescriptors else "0005000100", hex(struct.unpack("=B", struct.pack("=b", num))[0])[2:].zfill(2)
+			return None if suppressDescriptors else "0005000100", ("%x" % struct.unpack("=B", struct.pack("=b", num))[0]).zfill(2)
 
 		def exportInt16(num=0, suppressDescriptors=False):
-			return (None if suppressDescriptors else "0005000200"), hex(struct.unpack("=H", struct.pack("=h", num))[0])[2:].zfill(4)
+			return None if suppressDescriptors else "0005000200", ("%x" % struct.unpack("=H", struct.pack("=h", num))[0]).zfill(4)
 
 		def exportInt32(num=0, suppressDescriptors=False):
-			return None if suppressDescriptors else "0005000300", hex(struct.unpack("=L", struct.pack("=l", num))[0])[2:].zfill(8)
+			return None if suppressDescriptors else "0005000300", ("%x" % struct.unpack("=L", struct.pack("=l", num))[0]).zfill(8)
 
 		def exportInt64(num=0, suppressDescriptors=False):
-			return None if suppressDescriptors else "0005000400", hex(struct.unpack("=Q", struct.pack("=q", num))[0])[2:].zfill(16)
+			return None if suppressDescriptors else "0005000400", ("%x" % struct.unpack("=Q", struct.pack("=q", num))[0]).zfill(16)
 
 		def exportUInt8(num=0, suppressDescriptors=False):
-			return None if suppressDescriptors else "0005000500", hex(num)[2:].zfill(2)
+			return None if suppressDescriptors else "0005000500", ("%x" % num).zfill(2)
 
 		def exportUInt16(num=0, suppressDescriptors=False):
-			return None if suppressDescriptors else "0005000600", hex(num)[2:].zfill(4)
+			return None if suppressDescriptors else "0005000600", ("%x" % num).zfill(4)
 
 		def exportUInt32(num=0, suppressDescriptors=False):
-			return None if suppressDescriptors else "0005000700", hex(num)[2:].zfill(8)
+			return None if suppressDescriptors else "0005000700", ("%x" % num).zfill(8)
 
 		def exportUInt64(num=0, suppressDescriptors=False):
-			return None if suppressDescriptors else "0005000800", hex(num)[2:].zfill(16)
+			return None if suppressDescriptors else "0005000800", ("%x" % num).zfill(16)
 
 		def exportFloat32(num=0.0, suppressDescriptors=False):
-			return None if suppressDescriptors else "0005000900", hex(struct.unpack("=L", struct.pack("=f", num))[0])[2:].zfill(8)
+			return None if suppressDescriptors else "0005000900", ("%x" % struct.unpack("=L", struct.pack("=f", num))[0]).zfill(8)
 
 		def exportFloat64(num=0.0, suppressDescriptors=False):
-			return None if suppressDescriptors else "0005000a00", hex(struct.unpack("=Q", struct.pack("=d", num))[0])[2:].zfill(16)
+			return None if suppressDescriptors else "0005000a00", ("%x" % struct.unpack("=Q", struct.pack("=d", num))[0]).zfill(16)
 
 		def exportComplex64(num=0.0, suppressDescriptors=False):
-			return None if suppressDescriptors else "0005000c00", hex(struct.unpack("=Q", struct.pack("=ff", num.imag, num.real))[0])[2:].zfill(16)
+			return None if suppressDescriptors else "0005000c00", ("%x" % struct.unpack("=Q", struct.pack("=ff", num.imag, num.real))[0]).zfill(16)
 
 		def exportComplex128(num=0.0, suppressDescriptors=False):
 			s = struct.unpack("=QQ", struct.pack("=dd", num.real, num.imag))
-			return None if suppressDescriptors else "0005000d00", hex(s[0])[2:].zfill(16) + hex(s[1])[2:].zfill(16)
+			return None if suppressDescriptors else "0005000d00", ("%x" % s[0]).zfill(16) + ("%x" % s[1]).zfill(16)
 			
 		def exportBoolean(b=False, suppressDescriptors=False):
-			return None if suppressDescriptors else "00040021", hex(struct.unpack("=B", struct.pack("=?", b))[0])[2:].zfill(2)
+			return None if suppressDescriptors else "00040021", ("%x" % struct.unpack("=B", struct.pack("=?", b))[0]).zfill(2)
 
 		def exportString(s='', suppressDescriptors=False):
 			return None if suppressDescriptors else "00080030ffffffff", exportInt32(len(s))[1] + hexlify(bytearray(s, 'ascii')).decode()
